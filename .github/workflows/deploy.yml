@@ -1,23 +1,14 @@
-name: Deploy Tomcat to EC2
+name: Deploy Tomcat (Self-hosted)
 
 on:
   push:
-    branches: [ main ]      # ← mainにpushで発火（必要に応じて変更）
-  workflow_dispatch:         # 手動実行も可
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ec2, tomcat]  # 上で付けたラベルに合わせる
     steps:
-      - name: Checkout (optional)
-        uses: actions/checkout@v4
-
-      - name: SSH and deploy
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_KEY }}
-          port: ${{ secrets.EC2_PORT || 22 }}
-          script: |
-            /usr/local/bin/deploy_tomcat.sh
+      - uses: actions/checkout@v4
+      - name: Deploy locally on EC2
+        run: /usr/local/bin/deploy_tomcat.sh
