@@ -20,20 +20,30 @@ jobs:
       - name: Build WAR
         run: mvn -B -DskipTests package
 
-      - name: Detect WAR path
-        run: echo "WAR_FILE=$(ls -1 target/*.war | head -n1)" >> $GITHUB_ENV
+      - name: Find WAR (multi-module safe)
+        run: |
+          WAR=$(find . -type f -name "*.war" ! -name "original-*.war" | head -n1)
+          if [ -z "$WAR" ]; then
+            echo "No WAR built. Is packaging <war> in your pom.xml?" >&2
+            exit 1
+          fi
+          echo "WAR=$WAR" >> $GITHUB_ENV
+          echo "WAR_BASENAME=$(basename "$WAR")" >> $GITHUB_ENV
+          echo "Found WAR: $WAR"
 
-      - name: Upload WAR to EC2 (/tmp)
+      - name: Copy WAR to EC2:/tmp (SCP)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_KEY }}
           port: ${{ secrets.EC2_PORT || 22 }}
-          source: ${{ env.WAR_FILE }}
+          source: ${{ env.WAR }}
           target: /tmp/
+          overwrite: true
+          debug: true
 
-      - name: Hot deploy into Tomcat container
+      - name: Hot deploy into Tomcat
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -44,21 +54,19 @@ jobs:
             set -euo pipefail
             CONTAINER=tomcat
             WEBAPPS=/usr/local/tomcat/webapps
+            WAR="/tmp/${{ env.WAR_BASENAME }}"
+            NAME="$(basename "$WAR" .war)"
 
-            # Tomcatコンテナ起動を確認（無ければ起動：必要なら残す/要らなければ削除）
+            echo "Check uploaded WAR:"
+            ls -l "$WAR"
+
+            # 起動してなければTomcat起動
             if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
               docker run -d --name "$CONTAINER" -p 80:8080 --restart unless-stopped tomcat:9.0-jdk17-temurin
               docker exec "$CONTAINER" bash -lc 'cp -R /usr/local/tomcat/webapps.dist/ROOT /usr/local/tomcat/webapps/' || true
             fi
 
-            WAR=$(ls -1t /tmp/*.war | head -1)
-            NAME=$(basename "$WAR" .war)
-
-            # 既存の展開済みと旧WARを削除（ホットデプロイ）
+            # 既存アプリ削除→新WAR配置（自動展開を待つ）
             docker exec "$CONTAINER" bash -lc "rm -rf $WEBAPPS/$NAME $WEBAPPS/$NAME.war"
-
-            # 新WARを配置（自動展開＝再起動不要）
             docker cp "$WAR" "$CONTAINER:$WEBAPPS/"
-
-            # 簡易確認（ログ確認したければ次行のコメント解除）
-            # docker logs --tail=200 "$CONTAINER"
+            echo "Deployed $WAR -> $WEBAPPS/ (autoDeploy)"
