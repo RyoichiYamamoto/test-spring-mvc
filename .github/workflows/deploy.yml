@@ -1,18 +1,39 @@
-name: Deploy Tomcat to EC2
+name: Deploy WAR to Tomcat (EC2 via SSH)
 
 on:
   push:
-    branches: [ main ] 
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (optional)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: SSH and deploy
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Build WAR
+        run: mvn -B -DskipTests package
+
+      - name: Detect WAR path
+        run: echo "WAR_FILE=$(ls -1 target/*.war | head -n1)" >> $GITHUB_ENV
+
+      - name: Upload WAR to EC2 (/tmp)
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_KEY }}
+          port: ${{ secrets.EC2_PORT || 22 }}
+          source: ${{ env.WAR_FILE }}
+          target: /tmp/
+
+      - name: Hot deploy into Tomcat container
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -20,4 +41,24 @@ jobs:
           key: ${{ secrets.EC2_KEY }}
           port: ${{ secrets.EC2_PORT || 22 }}
           script: |
-            /usr/local/bin/deploy_tomcat.sh
+            set -euo pipefail
+            CONTAINER=tomcat
+            WEBAPPS=/usr/local/tomcat/webapps
+
+            # Tomcatコンテナ起動を確認（無ければ起動：必要なら残す/要らなければ削除）
+            if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+              docker run -d --name "$CONTAINER" -p 80:8080 --restart unless-stopped tomcat:9.0-jdk17-temurin
+              docker exec "$CONTAINER" bash -lc 'cp -R /usr/local/tomcat/webapps.dist/ROOT /usr/local/tomcat/webapps/' || true
+            fi
+
+            WAR=$(ls -1t /tmp/*.war | head -1)
+            NAME=$(basename "$WAR" .war)
+
+            # 既存の展開済みと旧WARを削除（ホットデプロイ）
+            docker exec "$CONTAINER" bash -lc "rm -rf $WEBAPPS/$NAME $WEBAPPS/$NAME.war"
+
+            # 新WARを配置（自動展開＝再起動不要）
+            docker cp "$WAR" "$CONTAINER:$WEBAPPS/"
+
+            # 簡易確認（ログ確認したければ次行のコメント解除）
+            # docker logs --tail=200 "$CONTAINER"
